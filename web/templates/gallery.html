@@ -1,0 +1,71 @@
+
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Pi-CatCam - Videogalleri</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>🐈 Pi-CatCam</h1>
+
+        <h2>🎬 Videogalleri</h2>
+
+        <p>{{ videos|length }} inspelningar</p>
+
+        <a class="button"
+           href="{{ url_for('index') }}">
+            ← Tillbaka till livevideo
+        </a>
+
+        {% if videos %}
+
+        <div class="gallery">
+
+            {% for video in videos %}
+
+            <div class="video-card">
+
+                <video controls preload="none">
+                    <source
+                        src="{{ url_for('serve_video',
+                                     filename=video.filename) }}"
+                        type="video/mp4">
+                    Din webbläsare stöder inte video.
+                </video>
+
+                <h3>{{ video.date }}</h3>
+
+                <p>
+                    🕒 {{ video.time }}
+                </p>
+
+                <p>
+                    💾 {{ video.size }} MB
+                </p>
+
+            </div>
+
+            {% endfor %}
+
+        </div>
+
+        {% else %}
+
+        <div class="empty">
+            <p>Inga inspelningar hittades.</p>
+        </div>
+
+        {% endif %}
+
+    </div>
+</body>
+</html>

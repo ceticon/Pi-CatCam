@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtuella miljöer
+myenv/
+myenv_old/
+.venv/
+venv/
+
+# Inspelade filmer
+videos/
+*.h264
+*.mp4
+
+# Testbilder
+test.jpg
+
+# Lokala inställningar
+.env
+
+# Säkerhetskopior
+catcam_backup.py
+catcam_v1.2.py
+web/app_backup*.py

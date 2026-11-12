@@ -1,0 +1,77 @@
+
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Pi-CatCam</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>🐈 Pi-CatCam</h1>
+
+        <h2>Livevideo</h2>
+
+        <img
+            class="video"
+            src="{{ url_for('video_feed') }}"
+            alt="Livevideo från Pi-CatCam"
+        >
+
+        <div class="status">
+            <h2>Kamerastatus</h2>
+
+            <p id="camera">Kamera: Väntar...</p>
+            <p id="motion">PIR: Väntar...</p>
+            <p id="recording">Inspelning: Väntar...</p>
+        </div>
+
+        <a class="button"
+           href="{{ url_for('gallery') }}">
+            🎬 Videogalleri
+        </a>
+
+    </div>
+
+    <script>
+        async function updateStatus() {
+            try {
+                const response = await fetch("/api/status");
+                const data = await response.json();
+
+                document.getElementById("camera").textContent =
+                    "Kamera: " +
+                    (data.camera === "online" ? "Online" : "Offline");
+
+                document.getElementById("motion").textContent =
+                    "PIR: " +
+                    (data.motion ? "Rörelse upptäckt" : "Ingen rörelse");
+
+                const recording =
+                    document.getElementById("recording");
+
+                recording.textContent =
+                    "Inspelning: " +
+                    (data.recording ? "PÅGÅR" : "Väntar");
+
+                recording.className =
+                    data.recording ? "active" : "idle";
+
+            } catch (error) {
+                console.error("Statusfel:", error);
+            }
+        }
+
+        updateStatus();
+        setInterval(updateStatus, 1000);
+    </script>
+
+</body>
+</html>
