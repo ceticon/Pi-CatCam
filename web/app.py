@@ -125,7 +125,10 @@ def gallery():
 
     for file in VIDEO_DIR.glob("*.mp4"):
 
-        stat = file.stat()
+        try:
+            stat = file.stat()
+        except FileNotFoundError:
+            continue
 
         # Försök läsa datum från filnamnet
         try:
@@ -171,6 +174,58 @@ def serve_video(filename):
         filename,
         conditional=True
     )
+
+
+# ==========================================
+# Ta bort videofil
+# ==========================================
+
+@app.route("/api/videos/<filename>", methods=["DELETE"])
+def delete_video(filename):
+
+    # Tillåt endast CatCam MP4-filer.
+    if (
+        Path(filename).name != filename
+        or not filename.startswith("catcam_")
+        or not filename.endswith(".mp4")
+    ):
+        return jsonify({
+            "success": False,
+            "error": "Ogiltigt filnamn"
+        }), 400
+
+    # Kontrollera att filen ligger i videos-katalogen.
+    video_file = VIDEO_DIR / filename
+
+    if not video_file.is_file() or video_file.is_symlink():
+        return jsonify({
+            "success": False,
+            "error": "Videofilen finns inte"
+        }), 404
+
+    try:
+        video_file.unlink()
+
+        print(
+            f"Videofil raderad: {filename}",
+            flush=True
+        )
+
+        return jsonify({
+            "success": True,
+            "filename": filename
+        })
+
+    except OSError as error:
+        print(
+            f"Fel vid radering av {filename}: {error}",
+            flush=True
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Kunde inte radera videofilen"
+        }), 500
 
 
 # ==========================================

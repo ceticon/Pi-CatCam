@@ -10,6 +10,29 @@
 
     <link rel="stylesheet"
           href="{{ url_for('static', filename='style.css') }}">
+
+    <style>
+        .delete-button {
+            display: inline-block;
+            background-color: #c0392b;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 18px;
+            margin-top: 10px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .delete-button:hover {
+            background-color: #922b21;
+        }
+
+        .delete-button:disabled {
+            opacity: 0.5;
+            cursor: wait;
+        }
+    </style>
 </head>
 
 <body>
@@ -19,7 +42,12 @@
 
         <h2>🎬 Videogalleri</h2>
 
-        <p>{{ videos|length }} inspelningar</p>
+        <p>
+            <span id="video-count">
+                {{ videos|length }}
+            </span>
+            inspelningar
+        </p>
 
         <a class="button"
            href="{{ url_for('index') }}">
@@ -28,7 +56,7 @@
 
         {% if videos %}
 
-        <div class="gallery">
+        <div class="gallery" id="video-gallery">
 
             {% for video in videos %}
 
@@ -52,6 +80,14 @@
                     💾 {{ video.size }} MB
                 </p>
 
+                <button
+                    type="button"
+                    class="delete-button"
+                    data-filename="{{ video.filename }}"
+                    onclick="deleteVideo(this)">
+                    🗑️ Ta bort
+                </button>
+
             </div>
 
             {% endfor %}
@@ -60,12 +96,97 @@
 
         {% else %}
 
-        <div class="empty">
+        <div class="empty" id="empty-gallery">
             <p>Inga inspelningar hittades.</p>
         </div>
 
         {% endif %}
 
     </div>
+
+    <script>
+        async function deleteVideo(button) {
+
+            const filename = button.dataset.filename;
+
+            const confirmed = confirm(
+                "Vill du verkligen radera denna film?\n\n" +
+                filename +
+                "\n\nDet går inte att ångra."
+            );
+
+            if (!confirmed) {
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = "Raderar...";
+
+            try {
+                const response = await fetch(
+                    "/api/videos/" +
+                    encodeURIComponent(filename),
+                    {
+                        method: "DELETE"
+                    }
+                );
+
+                const result = await response.json();
+
+                if (!response.ok || !result.success) {
+                    throw new Error(
+                        result.error || "Kunde inte radera filmen"
+                    );
+                }
+
+                // Ta bort filmens kort från sidan.
+                const card = button.closest(".video-card");
+                card.remove();
+
+                // Uppdatera antalet inspelningar.
+                const countElement =
+                    document.getElementById("video-count");
+
+                const newCount =
+                    Math.max(
+                        0,
+                        Number(countElement.textContent) - 1
+                    );
+
+                countElement.textContent = newCount;
+
+                // Visa meddelande om galleriet är tomt.
+                if (newCount === 0) {
+                    const gallery =
+                        document.getElementById("video-gallery");
+
+                    if (gallery) {
+                        gallery.remove();
+                    }
+
+                    const empty = document.createElement("div");
+                    empty.className = "empty";
+
+                    const message = document.createElement("p");
+                    message.textContent = "Inga inspelningar hittades.";
+
+                    empty.appendChild(message);
+
+                    document.querySelector(".container")
+                        .appendChild(empty);
+                }
+
+            } catch (error) {
+
+                alert(
+                    "Fel vid radering:\n" + error.message
+                );
+
+                button.disabled = false;
+                button.textContent = "🗑️ Ta bort";
+            }
+        }
+    </script>
+
 </body>
 </html>

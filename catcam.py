@@ -1,6 +1,7 @@
 
 #!/usr/bin/env python3
 
+import os
 import subprocess
 import threading
 import time
@@ -8,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from gpiozero import MotionSensor
+from gpiozero import MotionSensor, OutputDevice
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FileOutput
@@ -19,37 +20,41 @@ from web.app import (
     start_webserver
 )
 
-
 # ==========================================
-# Pi-CatCam v1.3 - Inställningar
+# Pi-CatCam v1.6
 # ==========================================
 
-# PIR-sensor
+# GPIO
 PIR_PIN = 17
+IR_PIN = 18
 
-# Eftergångstid i sekunder
+# Inspelning
 RECORD_DELAY = 10.0
-
-# Videoinspelning - Full HD
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 FRAMERATE = 25
 BITRATE = 8_000_000
 
-# Livevideo - Flask
+# Livevideo
 LIVE_WIDTH = 640
 LIVE_HEIGHT = 360
 LIVE_FPS = 5
 JPEG_QUALITY = 70
 
-# Kataloger
+# Kamerawatchdog
+WATCHDOG_TIMEOUT = 20.0
+WATCHDOG_STARTUP_DELAY = 30.0
+WATCHDOG_INTERVAL = 2.0
+
+# IR-belysning
+IR_ENABLED = True
+
 BASE_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = BASE_DIR / "videos"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
-
 # ==========================================
-# Status
+# Globala variabler
 # ==========================================
 
 recording = False
@@ -57,42 +62,67 @@ last_motion_time = 0.0
 current_file = None
 
 stop_event = threading.Event()
+camera_lock = threading.Lock()
+frame_lock = threading.Lock()
 
+last_frame_time = time.monotonic()
+
+conversion_threads = []
+
+pir = None
+camera = None
+ir_light = None
+
+
+# ==========================================
+# Loggning
+# ==========================================
+
+def log(message):
+    timestamp = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    print(f"[{timestamp}] {message}", flush=True)
+
+
+# ==========================================
+# Inspelningsstatus
+# ==========================================
 
 def is_recording():
     return recording
 
 
 # ==========================================
-# PIR-sensor
+# IR-belysning
 # ==========================================
 
-pir = MotionSensor(PIR_PIN)
+def start_ir():
+    global ir_light
+
+    # initial_value=False gör att utgången
+    # börjar i avstängt läge.
+    ir_light = OutputDevice(
+        IR_PIN,
+        active_high=True,
+        initial_value=False
+    )
+
+    if IR_ENABLED:
+        ir_light.on()
+        log("IR-belysning PÅ (GPIO18)")
+    else:
+        log("IR-belysning AV")
 
 
-# ==========================================
-# Kamera
-# ==========================================
+def stop_ir():
+    global ir_light
 
-camera = Picamera2()
-
-config = camera.create_video_configuration(
-    main={
-        "size": (VIDEO_WIDTH, VIDEO_HEIGHT),
-        "format": "YUV420"
-    },
-    lores={
-        "size": (LIVE_WIDTH, LIVE_HEIGHT),
-        "format": "YUV420"
-    },
-    controls={
-        "FrameRate": FRAMERATE
-    },
-    buffer_count=4
-)
-
-camera.configure(config)
-camera.start()
+    if ir_light is not None:
+        ir_light.off()
+        ir_light.close()
+        ir_light = None
+        log("IR-belysning AV")
 
 
 # ==========================================
@@ -103,49 +133,73 @@ def convert_to_mp4(h264_file):
 
     mp4_file = h264_file.with_suffix(".mp4")
 
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-fflags", "+genpts",
-        "-r", str(FRAMERATE),
-        "-i", str(h264_file),
-        "-c:v", "copy",
-        "-movflags", "+faststart",
-        str(mp4_file)
-    ]
-
-    print("Konverterar till MP4...", flush=True)
-
     try:
-        subprocess.run(command, check=True)
+        if not h264_file.exists():
+            log(f"Filen saknas: {h264_file.name}")
+            return
 
-        if not mp4_file.is_file() or mp4_file.stat().st_size == 0:
-            raise RuntimeError("MP4-filen saknas eller är tom")
+        if h264_file.stat().st_size == 0:
+            log(
+                f"VARNING: Tom inspelning: "
+                f"{h264_file.name}"
+            )
+            return
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-fflags", "+genpts",
+            "-r", str(FRAMERATE),
+            "-i", str(h264_file),
+            "-c:v", "copy",
+            "-movflags", "+faststart",
+            str(mp4_file)
+        ]
+
+        log(f"Konverterar: {h264_file.name}")
+
+        subprocess.run(
+            command,
+            check=True,
+            timeout=300
+        )
+
+        if (
+            not mp4_file.exists()
+            or mp4_file.stat().st_size == 0
+        ):
+            raise RuntimeError(
+                "MP4-filen saknas eller är tom"
+            )
 
         h264_file.unlink()
 
-        print(
-            f"MP4 sparad: {mp4_file.name}",
-            flush=True
-        )
+        log(f"MP4 sparad: {mp4_file.name}")
 
-    except (
-        subprocess.CalledProcessError,
-        OSError,
-        RuntimeError
-    ) as error:
+    except Exception as error:
+        log(f"MP4-konvertering misslyckades: {error}")
+        log(f"Originalfilen behålls: {h264_file.name}")
 
-        print(
-            f"MP4-konvertering misslyckades: {error}",
-            flush=True
-        )
 
-        print(
-            f"Originalfilen behålls: {h264_file.name}",
-            flush=True
-        )
+def start_conversion(h264_file):
+
+    # Ta bort avslutade trådar från listan.
+    conversion_threads[:] = [
+        thread
+        for thread in conversion_threads
+        if thread.is_alive()
+    ]
+
+    thread = threading.Thread(
+        target=convert_to_mp4,
+        args=(h264_file,),
+        daemon=False
+    )
+
+    thread.start()
+    conversion_threads.append(thread)
 
 
 # ==========================================
@@ -153,6 +207,7 @@ def convert_to_mp4(h264_file):
 # ==========================================
 
 def start_recording():
+
     global recording, current_file
 
     timestamp = datetime.now().strftime(
@@ -165,17 +220,17 @@ def start_recording():
 
     encoder = H264Encoder(bitrate=BITRATE)
 
-    camera.start_encoder(
-        encoder,
-        FileOutput(str(current_file))
-    )
+    with camera_lock:
+        camera.start_encoder(
+            encoder,
+            FileOutput(str(current_file))
+        )
 
     recording = True
 
-    print(
+    log(
         f"Rörelse! Inspelning startad: "
-        f"{current_file.name}",
-        flush=True
+        f"{current_file.name}"
     )
 
 
@@ -184,22 +239,25 @@ def start_recording():
 # ==========================================
 
 def stop_recording():
-    global recording
 
-    camera.stop_encoder()
+    global recording, current_file
+
+    if not recording:
+        return
+
+    with camera_lock:
+        camera.stop_encoder()
+
     recording = False
 
-    print(
-        "Inspelning avslutad",
-        flush=True
-    )
+    finished_file = current_file
+    current_file = None
 
-    convert_to_mp4(current_file)
+    log("Inspelning avslutad")
 
-    print(
-        "Väntar på rörelse...",
-        flush=True
-    )
+    start_conversion(finished_file)
+
+    log("Väntar på rörelse...")
 
 
 # ==========================================
@@ -208,10 +266,9 @@ def stop_recording():
 
 def live_video_worker():
 
-    print(
-        "Livevideo startad",
-        flush=True
-    )
+    global last_frame_time
+
+    log("Livevideo startad")
 
     interval = 1.0 / LIVE_FPS
 
@@ -220,17 +277,17 @@ def live_video_worker():
         start_time = time.monotonic()
 
         try:
-
-            # Hämta bild från lores-strömmen
             yuv = camera.capture_array("lores")
 
-            # Konvertera YUV420 till BGR
+            # En riktig bildruta har mottagits.
+            with frame_lock:
+                last_frame_time = time.monotonic()
+
             bgr = cv2.cvtColor(
                 yuv,
                 cv2.COLOR_YUV2BGR_I420
             )
 
-            # Koda bilden som JPEG
             success, jpeg = cv2.imencode(
                 ".jpg",
                 bgr,
@@ -241,139 +298,210 @@ def live_video_worker():
             )
 
             if success:
-                update_frame(
-                    jpeg.tobytes()
-                )
+                update_frame(jpeg.tobytes())
 
         except Exception as error:
-
             if not stop_event.is_set():
-                print(
-                    f"Livevideo-fel: {error}",
-                    flush=True
-                )
+                log(f"Livevideo-fel: {error}")
+                stop_event.wait(0.5)
 
-                time.sleep(0.5)
-
-        elapsed = (
-            time.monotonic() - start_time
-        )
+        elapsed = time.monotonic() - start_time
 
         stop_event.wait(
             max(0, interval - elapsed)
         )
 
-    print(
-        "Livevideo stoppad",
-        flush=True
-    )
+    log("Livevideo stoppad")
 
 
 # ==========================================
-# Flask
+# Kamerawatchdog
 # ==========================================
 
-init_app(
-    camera,
-    pir,
-    is_recording
-)
+def camera_watchdog():
 
-web_thread = threading.Thread(
-    target=start_webserver,
-    daemon=True
-)
+    log("Camera Watchdog startad")
 
-live_thread = threading.Thread(
-    target=live_video_worker,
-    daemon=True
-)
+    if stop_event.wait(WATCHDOG_STARTUP_DELAY):
+        return
 
+    while not stop_event.is_set():
 
-# ==========================================
-# Startinformation
-# ==========================================
+        with frame_lock:
+            elapsed = (
+                time.monotonic()
+                - last_frame_time
+            )
 
-print("================================")
-print("        Pi-CatCam v1.3")
-print("================================")
-print(
-    f"Inspelning: {VIDEO_WIDTH}x{VIDEO_HEIGHT}"
-)
-print(
-    f"Livevideo: {LIVE_WIDTH}x{LIVE_HEIGHT}"
-)
-print(
-    f"Live FPS: {LIVE_FPS}"
-)
-print(
-    f"Eftergångstid: {RECORD_DELAY} sek"
-)
+        if elapsed > WATCHDOG_TIMEOUT:
 
-web_thread.start()
-live_thread.start()
+            log(
+                "WATCHDOG: Inga nya bildrutor "
+                f"på {elapsed:.1f} sekunder!"
+            )
 
-print(
-    "Webbserver: http://0.0.0.0:5000"
-)
+            log(
+                "WATCHDOG: Startar om "
+                "Pi-CatCam via systemd..."
+            )
 
-print(
-    "Väntar på rörelse...",
-    flush=True
-)
+            # Restart=on-failure i systemd.
+            # OBS: Tvingad avslutning innebär att
+            # pågående inspelning inte hinner stängas.
+            os._exit(1)
+
+        stop_event.wait(WATCHDOG_INTERVAL)
 
 
 # ==========================================
 # Huvudprogram
 # ==========================================
 
-try:
+def main():
 
-    while True:
+    global pir, camera
+    global last_frame_time, last_motion_time
 
-        now = time.monotonic()
+    log("================================")
+    log("        Pi-CatCam v1.6")
+    log("================================")
 
-        # Rörelse upptäckt
-        if pir.motion_detected:
+    log(f"PIR: GPIO{PIR_PIN}")
+    log(f"IR-belysning: GPIO{IR_PIN}")
 
-            last_motion_time = now
+    log(
+        f"Inspelning: "
+        f"{VIDEO_WIDTH}x{VIDEO_HEIGHT}"
+    )
 
-            if not recording:
-                start_recording()
+    log(
+        f"Livevideo: "
+        f"{LIVE_WIDTH}x{LIVE_HEIGHT}"
+    )
 
-        # Ingen rörelse
-        elif recording:
+    log(
+        f"Eftergångstid: "
+        f"{RECORD_DELAY} sekunder"
+    )
 
-            elapsed = (
-                now - last_motion_time
-            )
+    try:
+        pir = MotionSensor(PIR_PIN)
 
-            if elapsed >= RECORD_DELAY:
+        # Starta IR-belysningen.
+        start_ir()
+
+        camera = Picamera2()
+
+        config = camera.create_video_configuration(
+            main={
+                "size": (
+                    VIDEO_WIDTH,
+                    VIDEO_HEIGHT
+                ),
+                "format": "YUV420"
+            },
+            lores={
+                "size": (
+                    LIVE_WIDTH,
+                    LIVE_HEIGHT
+                ),
+                "format": "YUV420"
+            },
+            controls={
+                "FrameRate": FRAMERATE
+            },
+            buffer_count=4
+        )
+
+        camera.configure(config)
+        camera.start()
+
+        with frame_lock:
+            last_frame_time = time.monotonic()
+
+        log("Kamera startad")
+
+        init_app(
+            camera,
+            pir,
+            is_recording
+        )
+
+        web_thread = threading.Thread(
+            target=start_webserver,
+            daemon=True
+        )
+
+        live_thread = threading.Thread(
+            target=live_video_worker,
+            daemon=True
+        )
+
+        watchdog_thread = threading.Thread(
+            target=camera_watchdog,
+            daemon=True
+        )
+
+        web_thread.start()
+        live_thread.start()
+        watchdog_thread.start()
+
+        log("Webbserver: http://0.0.0.0:5000")
+        log("Väntar på rörelse...")
+
+        while not stop_event.is_set():
+
+            now = time.monotonic()
+
+            if pir.motion_detected:
+
+                last_motion_time = now
+
+                if not recording:
+                    start_recording()
+
+            elif recording:
+
+                if (
+                    now - last_motion_time
+                    >= RECORD_DELAY
+                ):
+                    stop_recording()
+
+            stop_event.wait(0.1)
+
+    except KeyboardInterrupt:
+        log("Avslutar Pi-CatCam...")
+
+    finally:
+
+        stop_event.set()
+
+        # Stoppa inspelningen först.
+        try:
+            if recording:
                 stop_recording()
+        except Exception as error:
+            log(f"Fel vid inspelningsstopp: {error}")
 
-        time.sleep(0.1)
+        # Stäng av IR även om kameran får fel.
+        stop_ir()
 
-except KeyboardInterrupt:
+        if camera is not None:
+            try:
+                camera.stop()
+                camera.close()
+            except Exception as error:
+                log(f"Fel vid kamerastopp: {error}")
 
-    print(
-        "\nAvslutar Pi-CatCam...",
-        flush=True
-    )
+        if pir is not None:
+            pir.close()
 
-finally:
+        for thread in conversion_threads:
+            thread.join()
 
-    stop_event.set()
+        log("Pi-CatCam stoppad")
 
-    live_thread.join(timeout=3.0)
 
-    if recording:
-        stop_recording()
-
-    camera.stop()
-    camera.close()
-    pir.close()
-
-    print(
-        "Pi-CatCam stoppad",
-        flush=True
-    )
+if __name__ == "__main__":
+    main()
