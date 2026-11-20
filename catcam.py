@@ -14,39 +14,35 @@ from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FileOutput
 
-from web.app import (
-    init_app,
-    update_frame,
-    start_webserver
-)
+from web.app import init_app, update_frame, start_webserver
+
 
 # ==========================================
-# Pi-CatCam v1.7
+# INSTÄLLNINGAR
 # ==========================================
 
-# GPIO
 PIR_PIN = 17
 IR_PIN = 18
 
-# Inspelning
-RECORD_DELAY = 10.0
+PIR_FILTER_TIME = 0.5       # PIR måste vara aktiv i 500 ms
+PIR_DEBUG = True
+
+RECORD_DELAY = 10.0         # Eftergångstid i sekunder
+
 VIDEO_WIDTH = 1920
 VIDEO_HEIGHT = 1080
 FRAMERATE = 25
 BITRATE = 8_000_000
 
-# Livevideo
 LIVE_WIDTH = 640
 LIVE_HEIGHT = 360
 LIVE_FPS = 5
 JPEG_QUALITY = 70
 
-# Kamerawatchdog
 WATCHDOG_TIMEOUT = 20.0
 WATCHDOG_STARTUP_DELAY = 30.0
 WATCHDOG_INTERVAL = 2.0
 
-# IR-belysning
 IR_DEFAULT_MODE = "AUTO"
 IR_MOTION_IGNORE_TIME = 2.0
 
@@ -54,21 +50,23 @@ BASE_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = BASE_DIR / "videos"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # ==========================================
-# Globala variabler
+# GLOBALA VARIABLER
 # ==========================================
 
 recording = False
 last_motion_time = 0.0
+pir_motion_start = None
 current_file = None
 
 stop_event = threading.Event()
+
 camera_lock = threading.Lock()
 frame_lock = threading.Lock()
 ir_lock = threading.Lock()
 
 last_frame_time = time.monotonic()
-
 conversion_threads = []
 
 pir = None
@@ -81,26 +79,34 @@ ir_ignore_until = 0.0
 
 
 # ==========================================
-# Loggning
+# LOGGNING
 # ==========================================
 
 def log(message):
-    timestamp = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
 
 
 # ==========================================
-# Inspelningsstatus
+# PIR-DIAGNOSTIK
 # ==========================================
+
+def pir_motion_detected():
+    if PIR_DEBUG:
+        log("PIR GPIO17: Rörelse upptäckt")
+
+
+def pir_motion_ended():
+    if PIR_DEBUG:
+        log("PIR GPIO17: Ingen rörelse")
+
 
 def is_recording():
     return recording
 
 
 # ==========================================
-# IR-belysning
+# IR-BELYSNING
 # ==========================================
 
 def set_ir_output(enabled):
@@ -118,8 +124,7 @@ def set_ir_output(enabled):
         if enabled:
             ir_light.on()
             ir_ignore_until = (
-                time.monotonic()
-                + IR_MOTION_IGNORE_TIME
+                time.monotonic() + IR_MOTION_IGNORE_TIME
             )
             log("IR-belysning PÅ (GPIO18)")
         else:
@@ -190,11 +195,10 @@ def stop_ir():
 
 
 # ==========================================
-# MP4-konvertering
+# MP4-KONVERTERING
 # ==========================================
 
 def convert_to_mp4(h264_file):
-
     mp4_file = h264_file.with_suffix(".mp4")
 
     try:
@@ -203,10 +207,7 @@ def convert_to_mp4(h264_file):
             return
 
         if h264_file.stat().st_size == 0:
-            log(
-                f"VARNING: Tom inspelning: "
-                f"{h264_file.name}"
-            )
+            log(f"VARNING: Tom inspelning: {h264_file.name}")
             return
 
         command = [
@@ -230,16 +231,10 @@ def convert_to_mp4(h264_file):
             timeout=300
         )
 
-        if (
-            not mp4_file.exists()
-            or mp4_file.stat().st_size == 0
-        ):
-            raise RuntimeError(
-                "MP4-filen saknas eller är tom"
-            )
+        if not mp4_file.exists() or mp4_file.stat().st_size == 0:
+            raise RuntimeError("MP4-filen saknas eller är tom")
 
         h264_file.unlink()
-
         log(f"MP4 sparad: {mp4_file.name}")
 
     except Exception as error:
@@ -248,7 +243,6 @@ def convert_to_mp4(h264_file):
 
 
 def start_conversion(h264_file):
-
     conversion_threads[:] = [
         thread
         for thread in conversion_threads
@@ -266,20 +260,17 @@ def start_conversion(h264_file):
 
 
 # ==========================================
-# Starta inspelning
+# INSPELNING
 # ==========================================
 
 def start_recording():
-
     global recording, current_file
 
     timestamp = datetime.now().strftime(
         "%Y-%m-%d_%H-%M-%S_%f"
     )
 
-    current_file = (
-        VIDEO_DIR / f"catcam_{timestamp}.h264"
-    )
+    current_file = VIDEO_DIR / f"catcam_{timestamp}.h264"
 
     encoder = H264Encoder(bitrate=BITRATE)
 
@@ -291,18 +282,10 @@ def start_recording():
 
     recording = True
 
-    log(
-        f"Rörelse! Inspelning startad: "
-        f"{current_file.name}"
-    )
+    log(f"Rörelse! Inspelning startad: {current_file.name}")
 
-
-# ==========================================
-# Stoppa inspelning
-# ==========================================
 
 def stop_recording():
-
     global recording, current_file
 
     if not recording:
@@ -324,11 +307,10 @@ def stop_recording():
 
 
 # ==========================================
-# Livevideo
+# LIVEVIDEO
 # ==========================================
 
 def live_video_worker():
-
     global last_frame_time
 
     log("Livevideo startad")
@@ -336,7 +318,6 @@ def live_video_worker():
     interval = 1.0 / LIVE_FPS
 
     while not stop_event.is_set():
-
         start_time = time.monotonic()
 
         try:
@@ -353,10 +334,7 @@ def live_video_worker():
             success, jpeg = cv2.imencode(
                 ".jpg",
                 bgr,
-                [
-                    cv2.IMWRITE_JPEG_QUALITY,
-                    JPEG_QUALITY
-                ]
+                [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
             )
 
             if success:
@@ -377,11 +355,10 @@ def live_video_worker():
 
 
 # ==========================================
-# Kamerawatchdog
+# CAMERA WATCHDOG
 # ==========================================
 
 def camera_watchdog():
-
     log("Camera Watchdog startad")
 
     if stop_event.wait(WATCHDOG_STARTUP_DELAY):
@@ -390,79 +367,63 @@ def camera_watchdog():
     while not stop_event.is_set():
 
         with frame_lock:
-            elapsed = (
-                time.monotonic()
-                - last_frame_time
-            )
+            elapsed = time.monotonic() - last_frame_time
 
         if elapsed > WATCHDOG_TIMEOUT:
-
             log(
-                "WATCHDOG: Inga nya bildrutor "
-                f"på {elapsed:.1f} sekunder!"
+                f"WATCHDOG: Inga nya bildrutor på "
+                f"{elapsed:.1f} sekunder!"
             )
-
             log(
-                "WATCHDOG: Startar om "
-                "Pi-CatCam via systemd..."
+                "WATCHDOG: Startar om Pi-CatCam via systemd..."
             )
-
             os._exit(1)
 
         stop_event.wait(WATCHDOG_INTERVAL)
 
 
 # ==========================================
-# Huvudprogram
+# HUVUDPROGRAM
 # ==========================================
 
 def main():
-
     global pir, camera
     global last_frame_time, last_motion_time
+    global pir_motion_start
 
     log("================================")
-    log("        Pi-CatCam v1.7")
+    log(" Pi-CatCam v1.8 - PIR Filter")
     log("================================")
 
     log(f"PIR: GPIO{PIR_PIN}")
+    log(f"PIR-filter: {PIR_FILTER_TIME} sekunder")
+    log(f"PIR-diagnostik: {'PÅ' if PIR_DEBUG else 'AV'}")
     log(f"IR-belysning: GPIO{IR_PIN}")
-
-    log(
-        f"Inspelning: "
-        f"{VIDEO_WIDTH}x{VIDEO_HEIGHT}"
-    )
-
-    log(
-        f"Livevideo: "
-        f"{LIVE_WIDTH}x{LIVE_HEIGHT}"
-    )
-
-    log(
-        f"Eftergångstid: "
-        f"{RECORD_DELAY} sekunder"
-    )
+    log(f"Inspelning: {VIDEO_WIDTH}x{VIDEO_HEIGHT}")
+    log(f"Livevideo: {LIVE_WIDTH}x{LIVE_HEIGHT}")
+    log(f"Eftergångstid: {RECORD_DELAY} sekunder")
 
     try:
+        # Starta PIR
         pir = MotionSensor(PIR_PIN)
 
+        if PIR_DEBUG:
+            pir.when_motion = pir_motion_detected
+            pir.when_no_motion = pir_motion_ended
+
+        # Starta IR
         start_ir()
 
+        # Starta kamera
         camera = Picamera2()
 
         config = camera.create_video_configuration(
             main={
-                "size": (
-                    VIDEO_WIDTH,
-                    VIDEO_HEIGHT
-                ),
+                "size": (VIDEO_WIDTH, VIDEO_HEIGHT),
                 "format": "YUV420"
             },
             lores={
-                "size": (
-                    LIVE_WIDTH,
-                    LIVE_HEIGHT
-                ),
+                "size": (LIVE_WIDTH, LIVE_HEIGHT),
                 "format": "YUV420"
             },
             controls={
@@ -479,6 +440,7 @@ def main():
 
         log("Kamera startad")
 
+        # Starta webbserver
         init_app(
             camera,
             pir,
@@ -509,13 +471,33 @@ def main():
         log("Webbserver: http://0.0.0.0:5000")
         log("Väntar på rörelse...")
 
+        # ==================================
+        # HUVUDLOOP MED DIGITALT PIR-FILTER
+        # ==================================
+
         while not stop_event.is_set():
 
             now = time.monotonic()
-
             motion = pir.motion_detected
 
-            if motion and not recording:
+            # Digitalt filter:
+            # PIR måste vara aktiv kontinuerligt
+            # under PIR_FILTER_TIME sekunder.
+
+            if motion:
+                if pir_motion_start is None:
+                    pir_motion_start = now
+
+                filtered_motion = (
+                    now - pir_motion_start >= PIR_FILTER_TIME
+                )
+            else:
+                pir_motion_start = None
+                filtered_motion = False
+
+            # Starta inspelning
+            if filtered_motion and not recording:
+
                 last_motion_time = now
 
                 with ir_lock:
@@ -526,7 +508,8 @@ def main():
 
                 start_recording()
 
-            elif motion and recording:
+            # Förläng inspelning
+            elif filtered_motion and recording:
 
                 with ir_lock:
                     ignore_until = ir_ignore_until
@@ -534,12 +517,11 @@ def main():
                 if now >= ignore_until:
                     last_motion_time = now
 
+            # Stoppa inspelning efter eftergångstid
             elif recording:
 
-                if (
-                    now - last_motion_time
-                    >= RECORD_DELAY
-                ):
+                if now - last_motion_time >= RECORD_DELAY:
+
                     stop_recording()
 
                     with ir_lock:
@@ -554,7 +536,6 @@ def main():
         log("Avslutar Pi-CatCam...")
 
     finally:
-
         stop_event.set()
 
         try:
