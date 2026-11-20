@@ -6,10 +6,78 @@
     <meta name="viewport"
           content="width=device-width, initial-scale=1.0">
 
-    <title>Pi-CatCam</title>
+    <title>Pi-CatCam v1.7</title>
 
     <link rel="stylesheet"
           href="{{ url_for('static', filename='style.css') }}">
+
+    <style>
+        /* IR-styrning */
+
+        .ir-control {
+            margin: 20px 0;
+            padding: 20px;
+            background: #252525;
+            border-radius: 12px;
+        }
+
+        .ir-buttons {
+            display: flex;
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .ir-button {
+            flex: 1;
+            padding: 12px 8px;
+            border: 2px solid #555;
+            border-radius: 8px;
+            background: #353535;
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .ir-button:hover {
+            background: #484848;
+        }
+
+        .ir-button.selected {
+            background: #176b42;
+            border-color: #37c878;
+        }
+
+        .ir-button:disabled {
+            opacity: 0.5;
+            cursor: wait;
+        }
+
+        .ir-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 6px;
+            border-radius: 50%;
+            background: #777;
+            vertical-align: middle;
+        }
+
+        .ir-indicator.on {
+            background: #36d67a;
+            box-shadow: 0 0 8px #36d67a;
+        }
+
+        .ir-message {
+            min-height: 20px;
+            font-size: 14px;
+            color: #ddd;
+        }
+
+        .ir-error {
+            color: #ff8585;
+        }
+    </style>
 </head>
 
 <body>
@@ -33,6 +101,55 @@
             <p id="recording">Inspelning: Väntar...</p>
         </div>
 
+        <!-- IR-belysning -->
+
+        <div class="ir-control">
+            <h2>💡 IR-belysning</h2>
+
+            <div class="ir-buttons">
+                <button
+                    type="button"
+                    class="ir-button"
+                    data-mode="OFF"
+                    onclick="changeIrMode('OFF')">
+                    AV
+                </button>
+
+                <button
+                    type="button"
+                    class="ir-button"
+                    data-mode="AUTO"
+                    onclick="changeIrMode('AUTO')">
+                    AUTO
+                </button>
+
+                <button
+                    type="button"
+                    class="ir-button"
+                    data-mode="ON"
+                    onclick="changeIrMode('ON')">
+                    PÅ
+                </button>
+            </div>
+
+            <p>
+                Driftläge:
+                <strong id="ir-mode">Väntar...</strong>
+            </p>
+
+            <p>
+                <span
+                    id="ir-indicator"
+                    class="ir-indicator">
+                </span>
+
+                IR-utgång:
+                <strong id="ir-output">Väntar...</strong>
+            </p>
+
+            <p id="ir-message" class="ir-message"></p>
+        </div>
+
         <a class="button"
            href="{{ url_for('gallery') }}">
             🎬 Videogalleri
@@ -41,28 +158,154 @@
     </div>
 
     <script>
+        let irRequestPending = false;
+
+        // =====================================
+        // Uppdatera IR-status
+        // =====================================
+
+        function updateIrDisplay(ir) {
+            if (!ir) {
+                return;
+            }
+
+            const mode = ir.mode;
+            const enabled = Boolean(ir.enabled);
+
+            document.getElementById("ir-mode").textContent =
+                mode === "OFF" ? "AV" :
+                mode === "ON" ? "PÅ" :
+                mode === "AUTO" ? "AUTO" : "Okänt";
+
+            document.getElementById("ir-output").textContent =
+                enabled ? "PÅ" : "AV";
+
+            document.getElementById("ir-indicator")
+                .classList.toggle("on", enabled);
+
+            document.querySelectorAll(".ir-button")
+                .forEach(button => {
+                    button.classList.toggle(
+                        "selected",
+                        button.dataset.mode === mode
+                    );
+                });
+        }
+
+        // =====================================
+        // Ändra IR-läge
+        // =====================================
+
+        async function changeIrMode(mode) {
+            if (irRequestPending) {
+                return;
+            }
+
+            irRequestPending = true;
+
+            const message =
+                document.getElementById("ir-message");
+
+            message.textContent = "Ändrar IR-läge...";
+            message.classList.remove("ir-error");
+
+            document.querySelectorAll(".ir-button")
+                .forEach(button => {
+                    button.disabled = true;
+                });
+
+            try {
+                const response = await fetch("/api/ir", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        mode: mode
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(
+                        data.error || "Okänt fel"
+                    );
+                }
+
+                updateIrDisplay(data);
+
+                message.textContent =
+                    "IR-läge uppdaterat.";
+
+            } catch (error) {
+                console.error("IR-fel:", error);
+
+                message.textContent =
+                    "Fel: " + error.message;
+
+                message.classList.add("ir-error");
+
+            } finally {
+                irRequestPending = false;
+
+                document.querySelectorAll(".ir-button")
+                    .forEach(button => {
+                        button.disabled = false;
+                    });
+
+                updateStatus();
+            }
+        }
+
+        // =====================================
+        // Uppdatera kamerastatus
+        // =====================================
+
         async function updateStatus() {
             try {
-                const response = await fetch("/api/status");
+                const response = await fetch(
+                    "/api/status",
+                    { cache: "no-store" }
+                );
+
+                if (!response.ok) {
+                    throw new Error(
+                        "HTTP " + response.status
+                    );
+                }
+
                 const data = await response.json();
 
                 document.getElementById("camera").textContent =
                     "Kamera: " +
-                    (data.camera === "online" ? "Online" : "Offline");
+                    (data.camera === "online"
+                        ? "Online"
+                        : "Offline");
 
                 document.getElementById("motion").textContent =
                     "PIR: " +
-                    (data.motion ? "Rörelse upptäckt" : "Ingen rörelse");
+                    (data.motion
+                        ? "Rörelse upptäckt"
+                        : "Ingen rörelse");
 
                 const recording =
                     document.getElementById("recording");
 
                 recording.textContent =
                     "Inspelning: " +
-                    (data.recording ? "PÅGÅR" : "Väntar");
+                    (data.recording
+                        ? "PÅGÅR"
+                        : "Väntar");
 
                 recording.className =
                     data.recording ? "active" : "idle";
+
+                // Undvik att en statusuppdatering
+                // skriver över en pågående ändring.
+                if (!irRequestPending) {
+                    updateIrDisplay(data.ir);
+                }
 
             } catch (error) {
                 console.error("Statusfel:", error);

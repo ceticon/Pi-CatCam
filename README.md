@@ -2,11 +2,11 @@
 
 A lightweight, motion-activated surveillance camera built with a Raspberry Pi Zero 2 W.
 
-**Version 1.6**
+**Version 1.7**
 
-Pi-CatCam uses a PIR motion sensor to automatically record Full HD video when movement is detected. A Flask web interface provides live video, camera status and a gallery of recorded videos.
+Pi-CatCam uses a PIR motion sensor to automatically record Full HD video when movement is detected. A Flask web interface provides live video, camera status, infrared illumination controls and a gallery of recorded videos.
 
-The camera supports infrared night illumination, background MP4 conversion and automatic recovery from camera freezes.
+The camera supports automatic and manual infrared illumination, background MP4 conversion and automatic recovery from camera freezes.
 
 ## Features
 
@@ -22,6 +22,11 @@ The camera supports infrared night illumination, background MP4 conversion and a
 - Delete individual recordings from the video gallery
 - Confirmation before permanently deleting recordings
 - Infrared night illumination controlled via GPIO18
+- Three IR operating modes: OFF / AUTO / ON
+- Manual IR mode selection from the web interface
+- Automatic IR activation when motion is detected
+- IR status indicator in the web interface
+- Configurable PIR ignore period after IR activation
 - Camera watchdog with automatic restart on stalled video capture
 - Automatic startup and restart using systemd
 - Optimized for Raspberry Pi Zero 2 W
@@ -51,20 +56,65 @@ The Raspberry Pi uses 3.3V GPIO logic. Ensure that connected devices use compati
 
 The IR illumination is powered from 5V and controlled by GPIO18.
 
-### Infrared illumination
+## Infrared illumination
 
-The IR illumination is automatically enabled when Pi-CatCam starts.
+Pi-CatCam v1.7 supports three IR operating modes.
+
+| Mode | Description |
+|---|---|
+| OFF | IR illumination is always disabled |
+| AUTO | IR illumination turns on when motion is detected and turns off when recording ends |
+| ON | IR illumination remains continuously enabled |
+
+### Automatic mode
+
+AUTO is the default operating mode.
+
+When the PIR sensor detects movement:
+
+1. IR illumination is enabled.
+2. Full HD recording starts.
+3. Recording continues while motion is detected.
+4. When motion stops, recording continues for the configured delay.
+5. IR illumination is disabled when recording ends.
+
+The default recording delay is 10 seconds.
+
+### Manual IR control
+
+The web interface provides three buttons:
+
+**OFF / AUTO / ON**
+
+The selected operating mode and current IR output status are displayed on the main page.
+
+Changes take effect immediately without restarting Pi-CatCam.
+
+The IR operating mode is not currently stored permanently. After a restart, Pi-CatCam returns to AUTO mode.
+
+### IR configuration
+
+The default configuration is defined in `catcam.py`:
 
 ```python
 IR_PIN = 18
-IR_ENABLED = True
+IR_DEFAULT_MODE = "AUTO"
+IR_MOTION_IGNORE_TIME = 2.0
 ```
 
-To disable the IR illumination, change:
+`IR_DEFAULT_MODE` determines the operating mode at startup.
 
-```python
-IR_ENABLED = False
-```
+Available values:
+
+- `"OFF"`
+- `"AUTO"`
+- `"ON"`
+
+`IR_MOTION_IGNORE_TIME` defines a short period after IR activation during which PIR signals do not extend an active recording.
+
+This helps reduce the effect of brief disturbances when the IR illumination switches on. It does not eliminate continuous interference from the illumination.
+
+Physical separation or shielding between the IR illumination and PIR sensor may improve reliability.
 
 The IR illumination is switched off during normal program shutdown.
 
@@ -134,7 +184,44 @@ The interface provides:
 - Camera status
 - PIR motion detection status
 - Recording status
+- IR operating mode selection
+- IR output status
 - Video gallery
+
+### IR control API
+
+The IR operating mode can also be controlled through the Flask API.
+
+Read the current IR status:
+
+```http
+GET /api/ir
+```
+
+Example response:
+
+```json
+{
+    "success": true,
+    "mode": "AUTO",
+    "enabled": false
+}
+```
+
+Change the operating mode:
+
+```http
+POST /api/ir
+Content-Type: application/json
+
+{
+    "mode": "ON"
+}
+```
+
+Supported values are `OFF`, `AUTO` and `ON`.
+
+The existing `/api/status` endpoint also includes IR information.
 
 ### Video gallery
 
@@ -253,7 +340,8 @@ The main configuration parameters are defined in `catcam.py`.
 |---|---|
 | PIR_PIN | 17 |
 | IR_PIN | 18 |
-| IR_ENABLED | True |
+| IR_DEFAULT_MODE | AUTO |
+| IR_MOTION_IGNORE_TIME | 2 seconds |
 | RECORD_DELAY | 10 seconds |
 | VIDEO_WIDTH | 1920 |
 | VIDEO_HEIGHT | 1080 |
@@ -291,19 +379,31 @@ The Flask web interface is intended for use on a trusted local network.
 
 It does not currently provide authentication and should not be exposed directly to the internet.
 
-Anyone with access to the web interface can potentially delete recordings through the gallery.
+Anyone with access to the web interface can change the IR operating mode and potentially delete recordings through the gallery.
 
 ## Future improvements
 
 - Automatic cleanup of old recordings
 - Web-based configuration
 - Video thumbnails
-- Manual IR control from the web interface
+- Persistent IR mode configuration
 - Automatic IR control using ambient light detection
 - Improved camera diagnostics
 - Optional authentication for the web interface
 
 ## Version history
+
+### v1.7
+
+- Added three IR operating modes: OFF / AUTO / ON
+- Added automatic IR activation on PIR motion detection
+- Added automatic IR shutdown after recording
+- Added manual IR mode selection from the web interface
+- Added IR operating mode and output status indicators
+- Added `/api/ir` GET and POST endpoints
+- Extended `/api/status` with IR information
+- Added configurable PIR ignore period after IR activation
+- Updated documentation
 
 ### v1.6
 
@@ -332,8 +432,8 @@ Created by [ceticon](https://github.com/ceticon).
 
 ## Status
 
-**Pi-CatCam v1.6 — Working prototype.**
+**Pi-CatCam v1.7 — Working prototype.**
 
-Live video, motion detection, MP4 recording, infrared illumination and video deletion have been tested successfully.
+Live video, motion detection, MP4 recording, infrared operating modes and video deletion have been tested successfully.
 
-Long-term watchdog recovery remains to be fully verified.
+Long-term watchdog recovery and PIR reliability with infrared illumination remain to be fully verified.

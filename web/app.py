@@ -7,9 +7,14 @@ from flask import (
     jsonify,
     render_template,
     send_from_directory,
-    abort
+    abort,
+    request
 )
 import threading
+
+# ==========================================
+# Pi-CatCam v1.7 - Flask Web Interface
+# ==========================================
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -25,6 +30,10 @@ camera = None
 pir = None
 get_recording_status = None
 
+# IR-funktioner från catcam.py
+get_ir_status_callback = None
+set_ir_mode_callback = None
+
 frame_lock = threading.Condition()
 latest_frame = None
 frame_number = 0
@@ -34,12 +43,23 @@ frame_number = 0
 # Initiering
 # ==========================================
 
-def init_app(cam, pir_sensor, recording_status):
+def init_app(
+    cam,
+    pir_sensor,
+    recording_status,
+    ir_status=None,
+    ir_set_mode=None
+):
     global camera, pir, get_recording_status
+    global get_ir_status_callback
+    global set_ir_mode_callback
 
     camera = cam
     pir = pir_sensor
     get_recording_status = recording_status
+
+    get_ir_status_callback = ir_status
+    set_ir_mode_callback = ir_set_mode
 
 
 # ==========================================
@@ -102,8 +122,19 @@ def video_feed():
 
 @app.route("/api/status")
 def status():
+
+    ir_status = {
+        "mode": "OFF",
+        "enabled": False
+    }
+
+    if get_ir_status_callback:
+        ir_status = get_ir_status_callback()
+
     return jsonify({
-        "camera": "online" if camera else "offline",
+        "camera": (
+            "online" if camera else "offline"
+        ),
         "motion": (
             bool(pir.motion_detected)
             if pir else False
@@ -111,8 +142,84 @@ def status():
         "recording": (
             bool(get_recording_status())
             if get_recording_status else False
-        )
+        ),
+        "ir": ir_status
     })
+
+
+# ==========================================
+# IR-belysning - Läs status
+# ==========================================
+
+@app.route("/api/ir", methods=["GET"])
+def get_ir():
+
+    if get_ir_status_callback is None:
+        return jsonify({
+            "success": False,
+            "error": "IR-styrningen är inte tillgänglig"
+        }), 503
+
+    return jsonify({
+        "success": True,
+        **get_ir_status_callback()
+    })
+
+
+# ==========================================
+# IR-belysning - Ändra driftläge
+# ==========================================
+
+@app.route("/api/ir", methods=["POST"])
+def set_ir():
+
+    if set_ir_mode_callback is None:
+        return jsonify({
+            "success": False,
+            "error": "IR-styrningen är inte tillgänglig"
+        }), 503
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "success": False,
+            "error": "Ogiltiga JSON-data"
+        }), 400
+
+    mode = data.get("mode")
+
+    if not isinstance(mode, str):
+        return jsonify({
+            "success": False,
+            "error": "IR-läge saknas"
+        }), 400
+
+    mode = mode.upper()
+
+    if mode not in ("OFF", "AUTO", "ON"):
+        return jsonify({
+            "success": False,
+            "error": "Ogiltigt IR-läge"
+        }), 400
+
+    try:
+        result = set_ir_mode_callback(mode)
+
+        return jsonify({
+            "success": True,
+            **result
+        })
+
+    except Exception:
+        app.logger.exception(
+            "Kunde inte ändra IR-läge"
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Kunde inte ändra IR-läge"
+        }), 500
 
 
 # ==========================================
@@ -132,19 +239,27 @@ def gallery():
 
         # Försök läsa datum från filnamnet
         try:
-            date_string = file.stem.replace("catcam_", "")
+            date_string = file.stem.replace(
+                "catcam_", ""
+            )
+
             dt = datetime.strptime(
                 date_string,
                 "%Y-%m-%d_%H-%M-%S_%f"
             )
+
         except ValueError:
-            dt = datetime.fromtimestamp(stat.st_mtime)
+            dt = datetime.fromtimestamp(
+                stat.st_mtime
+            )
 
         videos.append({
             "filename": file.name,
             "date": dt.strftime("%Y-%m-%d"),
             "time": dt.strftime("%H:%M:%S"),
-            "size": round(stat.st_size / (1024 * 1024), 1),
+            "size": round(
+                stat.st_size / (1024 * 1024), 1
+            ),
             "timestamp": dt.timestamp()
         })
 
@@ -180,10 +295,12 @@ def serve_video(filename):
 # Ta bort videofil
 # ==========================================
 
-@app.route("/api/videos/<filename>", methods=["DELETE"])
+@app.route(
+    "/api/videos/<filename>",
+    methods=["DELETE"]
+)
 def delete_video(filename):
 
-    # Tillåt endast CatCam MP4-filer.
     if (
         Path(filename).name != filename
         or not filename.startswith("catcam_")
@@ -194,10 +311,12 @@ def delete_video(filename):
             "error": "Ogiltigt filnamn"
         }), 400
 
-    # Kontrollera att filen ligger i videos-katalogen.
     video_file = VIDEO_DIR / filename
 
-    if not video_file.is_file() or video_file.is_symlink():
+    if (
+        not video_file.is_file()
+        or video_file.is_symlink()
+    ):
         return jsonify({
             "success": False,
             "error": "Videofilen finns inte"
@@ -218,7 +337,8 @@ def delete_video(filename):
 
     except OSError as error:
         print(
-            f"Fel vid radering av {filename}: {error}",
+            f"Fel vid radering av "
+            f"{filename}: {error}",
             flush=True
         )
 

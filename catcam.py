@@ -21,7 +21,7 @@ from web.app import (
 )
 
 # ==========================================
-# Pi-CatCam v1.6
+# Pi-CatCam v1.7
 # ==========================================
 
 # GPIO
@@ -47,7 +47,8 @@ WATCHDOG_STARTUP_DELAY = 30.0
 WATCHDOG_INTERVAL = 2.0
 
 # IR-belysning
-IR_ENABLED = True
+IR_DEFAULT_MODE = "AUTO"
+IR_MOTION_IGNORE_TIME = 2.0
 
 BASE_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = BASE_DIR / "videos"
@@ -64,6 +65,7 @@ current_file = None
 stop_event = threading.Event()
 camera_lock = threading.Lock()
 frame_lock = threading.Lock()
+ir_lock = threading.Lock()
 
 last_frame_time = time.monotonic()
 
@@ -72,6 +74,10 @@ conversion_threads = []
 pir = None
 camera = None
 ir_light = None
+
+ir_mode = IR_DEFAULT_MODE
+ir_enabled = False
+ir_ignore_until = 0.0
 
 
 # ==========================================
@@ -97,32 +103,90 @@ def is_recording():
 # IR-belysning
 # ==========================================
 
-def start_ir():
-    global ir_light
+def set_ir_output(enabled):
+    global ir_enabled, ir_ignore_until
 
-    # initial_value=False gör att utgången
-    # börjar i avstängt läge.
-    ir_light = OutputDevice(
-        IR_PIN,
-        active_high=True,
-        initial_value=False
-    )
+    with ir_lock:
+        if ir_light is None:
+            return
 
-    if IR_ENABLED:
-        ir_light.on()
-        log("IR-belysning PÅ (GPIO18)")
+        enabled = bool(enabled)
+
+        if enabled == ir_enabled:
+            return
+
+        if enabled:
+            ir_light.on()
+            ir_ignore_until = (
+                time.monotonic()
+                + IR_MOTION_IGNORE_TIME
+            )
+            log("IR-belysning PÅ (GPIO18)")
+        else:
+            ir_light.off()
+            log("IR-belysning AV (GPIO18)")
+
+        ir_enabled = enabled
+
+
+def get_ir_status():
+    with ir_lock:
+        return {
+            "mode": ir_mode,
+            "enabled": ir_enabled
+        }
+
+
+def set_ir_mode(mode):
+    global ir_mode
+
+    mode = str(mode).upper()
+
+    if mode not in ("OFF", "AUTO", "ON"):
+        raise ValueError("Ogiltigt IR-läge")
+
+    with ir_lock:
+        ir_mode = mode
+
+    log(f"IR-läge ändrat till {mode}")
+
+    if mode == "ON":
+        set_ir_output(True)
+    elif mode == "OFF":
+        set_ir_output(False)
     else:
-        log("IR-belysning AV")
+        set_ir_output(is_recording())
+
+    return get_ir_status()
+
+
+def start_ir():
+    global ir_light, ir_enabled
+
+    with ir_lock:
+        ir_light = OutputDevice(
+            IR_PIN,
+            active_high=True,
+            initial_value=False
+        )
+        ir_enabled = False
+
+    log(f"IR-standardläge: {ir_mode}")
+
+    if ir_mode == "ON":
+        set_ir_output(True)
 
 
 def stop_ir():
-    global ir_light
+    global ir_light, ir_enabled
 
-    if ir_light is not None:
-        ir_light.off()
-        ir_light.close()
-        ir_light = None
-        log("IR-belysning AV")
+    with ir_lock:
+        if ir_light is not None:
+            ir_light.off()
+            ir_light.close()
+            ir_light = None
+            ir_enabled = False
+            log("IR-belysning AV")
 
 
 # ==========================================
@@ -185,7 +249,6 @@ def convert_to_mp4(h264_file):
 
 def start_conversion(h264_file):
 
-    # Ta bort avslutade trådar från listan.
     conversion_threads[:] = [
         thread
         for thread in conversion_threads
@@ -279,7 +342,6 @@ def live_video_worker():
         try:
             yuv = camera.capture_array("lores")
 
-            # En riktig bildruta har mottagits.
             with frame_lock:
                 last_frame_time = time.monotonic()
 
@@ -345,9 +407,6 @@ def camera_watchdog():
                 "Pi-CatCam via systemd..."
             )
 
-            # Restart=on-failure i systemd.
-            # OBS: Tvingad avslutning innebär att
-            # pågående inspelning inte hinner stängas.
             os._exit(1)
 
         stop_event.wait(WATCHDOG_INTERVAL)
@@ -363,7 +422,7 @@ def main():
     global last_frame_time, last_motion_time
 
     log("================================")
-    log("        Pi-CatCam v1.6")
+    log("        Pi-CatCam v1.7")
     log("================================")
 
     log(f"PIR: GPIO{PIR_PIN}")
@@ -387,7 +446,6 @@ def main():
     try:
         pir = MotionSensor(PIR_PIN)
 
-        # Starta IR-belysningen.
         start_ir()
 
         camera = Picamera2()
@@ -424,7 +482,9 @@ def main():
         init_app(
             camera,
             pir,
-            is_recording
+            is_recording,
+            get_ir_status,
+            set_ir_mode
         )
 
         web_thread = threading.Thread(
@@ -453,12 +513,26 @@ def main():
 
             now = time.monotonic()
 
-            if pir.motion_detected:
+            motion = pir.motion_detected
 
+            if motion and not recording:
                 last_motion_time = now
 
-                if not recording:
-                    start_recording()
+                with ir_lock:
+                    mode = ir_mode
+
+                if mode == "AUTO":
+                    set_ir_output(True)
+
+                start_recording()
+
+            elif motion and recording:
+
+                with ir_lock:
+                    ignore_until = ir_ignore_until
+
+                if now >= ignore_until:
+                    last_motion_time = now
 
             elif recording:
 
@@ -467,6 +541,12 @@ def main():
                     >= RECORD_DELAY
                 ):
                     stop_recording()
+
+                    with ir_lock:
+                        mode = ir_mode
+
+                    if mode == "AUTO":
+                        set_ir_output(False)
 
             stop_event.wait(0.1)
 
@@ -477,14 +557,12 @@ def main():
 
         stop_event.set()
 
-        # Stoppa inspelningen först.
         try:
             if recording:
                 stop_recording()
         except Exception as error:
             log(f"Fel vid inspelningsstopp: {error}")
 
-        # Stäng av IR även om kameran får fel.
         stop_ir()
 
         if camera is not None:
